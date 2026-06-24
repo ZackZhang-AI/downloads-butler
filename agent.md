@@ -150,3 +150,18 @@ Tone:
 ## Current Implementation Notes
 
 When resuming work, read this file first, then inspect `package.json`, `src/`, and `src-tauri/`.
+
+Status as of 2026-06-24:
+
+- React preview, Tailwind UI, core rules, sample scan flow, apply flow, and frontend tests are implemented.
+- `Undo Last Operation` is now wired through `undoLastOperation()` in `src/tauriClient.ts`; browser preview falls back to a harmless mock result.
+- Browser preview shows `Scan sample folder`; Tauri runtime shows `Scan Folder`.
+- Chinese keyword tests cover `发票` and `微信图片`.
+- Native Tauri verification is still blocked in this environment because `cargo`/Rust is not installed or not on `PATH`.
+
+Additional status as of 2026-06-24:
+
+- Category filter controls are implemented in the sidebar, including `All` and every MVP category.
+- Apply actions now open a confirmation preview dialog before any move operation is invoked.
+- The confirmation dialog lists selected files and suggested destinations, and reiterates that nothing is deleted.
+- Frontend tests cover category filtering and the confirmation-before-apply flow.

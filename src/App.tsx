@@ -1,6 +1,13 @@
 import { useMemo, useState } from 'react';
 import { buildButlerReport, type FileCategory, type FileSuggestion } from './core/downloadsButler';
-import { applySuggestions, chooseFolder, scanFolder, type OperationBatch } from './tauriClient';
+import {
+  applySuggestions,
+  chooseFolder,
+  getRuntimeMode,
+  scanFolder,
+  undoLastOperation,
+  type OperationBatch,
+} from './tauriClient';
 
 const categoryOrder: FileCategory[] = [
   'Invoices',
@@ -16,12 +23,18 @@ const categoryOrder: FileCategory[] = [
 export default function App() {
   const [folderPath, setFolderPath] = useState('C:/Users/you/Downloads');
   const [suggestions, setSuggestions] = useState<FileSuggestion[]>([]);
+  const [activeFilter, setActiveFilter] = useState<FileCategory | 'All'>('All');
   const [lastBatch, setLastBatch] = useState<OperationBatch | null>(null);
+  const [pendingApplyItems, setPendingApplyItems] = useState<FileSuggestion[] | null>(null);
   const [status, setStatus] = useState('No files moved yet. The butler is standing by with both hands visible.');
   const [isBusy, setIsBusy] = useState(false);
 
   const report = useMemo(() => buildButlerReport(suggestions), [suggestions]);
   const selectedSuggestions = suggestions.filter((suggestion) => suggestion.selected);
+  const visibleSuggestions = suggestions.filter((suggestion) =>
+    activeFilter === 'All' ? true : suggestion.category === activeFilter,
+  );
+  const isBrowserPreview = getRuntimeMode() === 'browser';
 
   async function handleChooseFolder() {
     const selected = await chooseFolder();
@@ -34,6 +47,7 @@ export default function App() {
     try {
       const scanned = await scanFolder(folderPath);
       setSuggestions(scanned);
+      setActiveFilter('All');
       setLastBatch(null);
       setStatus(`Found ${scanned.length} files worth a polite suggestion.`);
     } catch (error) {
@@ -51,16 +65,20 @@ export default function App() {
     );
   }
 
-  async function handleApply(items: FileSuggestion[]) {
+  function requestApply(items: FileSuggestion[]) {
     if (items.length === 0) {
       setStatus('Nothing selected. I admire the restraint.');
       return;
     }
+    setPendingApplyItems(items);
+  }
 
+  async function handleApply(items: FileSuggestion[]) {
     setIsBusy(true);
     try {
       const batch = await applySuggestions(items);
       setLastBatch(batch);
+      setPendingApplyItems(null);
       setStatus(`Applied ${batch.operations.length} careful moves. No deletions, as promised.`);
       const movedIds = new Set(items.map((item) => item.id));
       setSuggestions((current) =>
@@ -75,13 +93,22 @@ export default function App() {
     }
   }
 
-  function handleUndo() {
+  async function handleUndo() {
     if (!lastBatch) {
       setStatus('No previous operation to undo.');
       return;
     }
-    setStatus(`Undo prepared for ${lastBatch.operations.length} moves. Native file restore is wired through Tauri.`);
-    setLastBatch(null);
+    setIsBusy(true);
+    try {
+      const result = await undoLastOperation();
+      const restored = result.restored || lastBatch.operations.length;
+      setStatus(`Undo restored ${restored} files from the last operation.`);
+      setLastBatch(null);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Undo failed.');
+    } finally {
+      setIsBusy(false);
+    }
   }
 
   return (
@@ -104,7 +131,7 @@ export default function App() {
               Choose folder
             </button>
             <button className="btn-primary" type="button" onClick={handleScan} disabled={isBusy}>
-              {isBusy ? 'Working...' : 'Scan sample folder'}
+              {isBusy ? 'Working...' : isBrowserPreview ? 'Scan sample folder' : 'Scan Folder'}
             </button>
           </div>
         </header>
@@ -125,11 +152,26 @@ export default function App() {
           <aside className="rounded-lg border border-[#d8ded4] bg-white p-4">
             <h2 className="text-sm font-semibold text-[#17201b]">Categories</h2>
             <div className="mt-4 space-y-2">
+              <button
+                aria-label="All"
+                className={`category-button ${activeFilter === 'All' ? 'category-button-active' : ''}`}
+                type="button"
+                onClick={() => setActiveFilter('All')}
+              >
+                <span>All</span>
+                <span className="font-semibold">{suggestions.length}</span>
+              </button>
               {categoryOrder.map((category) => (
-                <div key={category} className="flex items-center justify-between rounded-md bg-[#f6f7f4] px-3 py-2 text-sm">
+                <button
+                  aria-label={category}
+                  key={category}
+                  className={`category-button ${activeFilter === category ? 'category-button-active' : ''}`}
+                  type="button"
+                  onClick={() => setActiveFilter(category)}
+                >
                   <span>{category}</span>
                   <span className="font-semibold">{report.categoryCounts[category]}</span>
-                </div>
+                </button>
               ))}
             </div>
 
@@ -146,13 +188,13 @@ export default function App() {
                 <p className="text-sm text-[#667464]">{selectedSuggestions.length} selected for approval.</p>
               </div>
               <div className="flex flex-wrap gap-2">
-                <button className="btn-secondary" type="button" onClick={() => handleApply(selectedSuggestions)}>
+                <button className="btn-secondary" type="button" onClick={() => requestApply(selectedSuggestions)}>
                   Apply Selected
                 </button>
                 <button
                   className="btn-primary"
                   type="button"
-                  onClick={() => handleApply(suggestions.filter((suggestion) => suggestion.confidence === 'high'))}
+                  onClick={() => requestApply(suggestions.filter((suggestion) => suggestion.confidence === 'high'))}
                 >
                   Apply High Confidence
                 </button>
@@ -171,9 +213,18 @@ export default function App() {
                   </p>
                 </div>
               </div>
+            ) : visibleSuggestions.length === 0 ? (
+              <div className="grid flex-1 place-items-center p-8 text-center">
+                <div>
+                  <p className="text-xl font-semibold">Nothing in this filter.</p>
+                  <p className="mt-2 max-w-md text-sm leading-6 text-[#667464]">
+                    The butler checked twice. Try All or another category.
+                  </p>
+                </div>
+              </div>
             ) : (
               <div className="divide-y divide-[#e4e8e1] overflow-hidden">
-                {suggestions.map((suggestion) => (
+                {visibleSuggestions.map((suggestion) => (
                   <label
                     key={suggestion.id}
                     className="grid cursor-pointer gap-3 px-4 py-4 transition hover:bg-[#f9faf7] md:grid-cols-[28px_1.1fr_1fr_130px_110px]"
@@ -214,6 +265,49 @@ export default function App() {
             </div>
           ) : null}
         </section>
+
+        {pendingApplyItems ? (
+          <div className="fixed inset-0 z-50 grid place-items-center bg-[#17201b]/35 px-4">
+            <section
+              aria-labelledby="confirm-apply-title"
+              aria-modal="true"
+              className="w-full max-w-2xl rounded-lg border border-[#d8ded4] bg-white p-5 shadow-2xl"
+              role="dialog"
+            >
+              <div className="flex flex-col gap-3 border-b border-[#d8ded4] pb-4 md:flex-row md:items-start md:justify-between">
+                <div>
+                  <h2 id="confirm-apply-title" className="text-xl font-semibold text-[#17201b]">
+                    Confirm careful moves
+                  </h2>
+                  <p className="mt-2 text-sm text-[#667464]">
+                    {pendingApplyItems.length} files selected. Nothing will be deleted.
+                  </p>
+                </div>
+                <button className="btn-secondary" type="button" onClick={() => setPendingApplyItems(null)}>
+                  Cancel
+                </button>
+              </div>
+
+              <div className="mt-4 max-h-72 space-y-3 overflow-auto">
+                {pendingApplyItems.map((item) => (
+                  <div key={item.id} className="rounded-md bg-[#f6f7f4] p-3">
+                    <p className="text-sm font-semibold text-[#17201b]">{item.name}</p>
+                    <p className="mt-1 break-all font-mono text-xs text-[#596359]">{item.suggestedRelativePath}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-5 flex flex-wrap justify-end gap-2">
+                <button className="btn-secondary" type="button" onClick={() => setPendingApplyItems(null)}>
+                  Keep Reviewing
+                </button>
+                <button className="btn-primary" type="button" onClick={() => handleApply(pendingApplyItems)} disabled={isBusy}>
+                  Confirm Apply
+                </button>
+              </div>
+            </section>
+          </div>
+        ) : null}
       </section>
     </main>
   );

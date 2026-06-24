@@ -58,6 +58,10 @@ export async function undoLastOperation(): Promise<{ restored: number }> {
   return invoke<{ restored: number }>('undo_last_operation');
 }
 
+export function getRuntimeMode(): 'tauri' | 'browser' {
+  return isTauriRuntime() ? 'tauri' : 'browser';
+}
+
 export function sampleFiles(folderPath = 'C:/Users/you/Downloads'): ScannedFile[] {
   return [
     {

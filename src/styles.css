@@ -68,3 +68,28 @@ input {
   border-color: #9dab99;
   background: #f6f7f4;
 }
+
+.category-button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  border-radius: 0.375rem;
+  border: 1px solid transparent;
+  background: #f6f7f4;
+  padding: 0.5rem 0.75rem;
+  color: #17201b;
+  font-size: 0.875rem;
+  text-align: left;
+}
+
+.category-button:hover {
+  border-color: #c8d1c5;
+  background: #eef2eb;
+}
+
+.category-button-active {
+  border-color: #2f6f4e;
+  background: #dcefe2;
+  color: #24543b;
+}

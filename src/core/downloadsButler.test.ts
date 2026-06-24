@@ -8,7 +8,16 @@ import {
 
 describe('Downloads Butler rules', () => {
   it('classifies invoice keywords before generic PDFs', () => {
-    expect(classifyFile({ name: 'invoice-final-final.pdf', size: 120, modifiedAt: '2026-06-23T10:20:00.000Z' })).toMatchObject({
+    expect(
+      classifyFile({ name: 'invoice-final-final.pdf', size: 120, modifiedAt: '2026-06-23T10:20:00.000Z' }),
+    ).toMatchObject({
+      category: 'Invoices',
+      confidence: 'high',
+    });
+  });
+
+  it('classifies Chinese invoice keywords before generic PDFs', () => {
+    expect(classifyFile({ name: '发票_20260623.pdf', size: 120, modifiedAt: '2026-06-23T10:20:00.000Z' })).toMatchObject({
       category: 'Invoices',
       confidence: 'high',
     });
@@ -30,6 +39,17 @@ describe('Downloads Butler rules', () => {
     });
 
     expect(suggestion.suggestedRelativePath).toBe('Screenshots/screenshot-2026-06-23-104122.png');
+  });
+
+  it('normalizes WeChat image names with parsed timestamps', () => {
+    const suggestion = makeSuggestion({
+      name: '微信图片_20260623102039.jpg',
+      path: 'C:/Users/me/Downloads/微信图片_20260623102039.jpg',
+      size: 100,
+      modifiedAt: '2026-06-23T10:20:00.000Z',
+    });
+
+    expect(suggestion.suggestedRelativePath).toBe('Screenshots/wechat-image-2026-06-23-102039.jpg');
   });
 
   it('groups duplicates only when both size and hash match', () => {
