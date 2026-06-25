@@ -61,6 +61,32 @@ describe('Downloads Butler app', () => {
     expect(screen.queryByText('invoice-final-final.pdf')).not.toBeInTheDocument();
   });
 
+  it('searches suggestions by file name', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole('button', { name: /scan sample folder/i }));
+    await user.type(screen.getByRole('searchbox', { name: /search suggestions/i }), 'setup');
+
+    expect(screen.getByText('setup.exe')).toBeInTheDocument();
+    expect(screen.queryByText('invoice-final-final.pdf')).not.toBeInTheDocument();
+  });
+
+  it('selects visible suggestions and clears the selection', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole('button', { name: /scan sample folder/i }));
+    await user.click(screen.getByRole('button', { name: /^unknown$/i }));
+    await user.click(screen.getByRole('button', { name: /select visible/i }));
+
+    expect(screen.getByText(/1 selected for approval/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /clear selection/i }));
+
+    expect(screen.getByText(/0 selected for approval/i)).toBeInTheDocument();
+  });
+
   it('previews selected moves before applying them', async () => {
     const user = userEvent.setup();
     render(<App />);

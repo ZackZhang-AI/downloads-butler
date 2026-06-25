@@ -165,3 +165,10 @@ Additional status as of 2026-06-24:
 - Apply actions now open a confirmation preview dialog before any move operation is invoked.
 - The confirmation dialog lists selected files and suggested destinations, and reiterates that nothing is deleted.
 - Frontend tests cover category filtering and the confirmation-before-apply flow.
+
+Status as of 2026-06-25:
+
+- The suggestions list supports search by original file name or suggested destination.
+- `Select Visible` now selects only the currently visible filtered/searched rows, replacing the previous selection.
+- `Clear Selection` resets all suggestion checkboxes.
+- Frontend tests cover search and visible-row bulk selection behavior.

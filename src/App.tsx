@@ -24,6 +24,7 @@ export default function App() {
   const [folderPath, setFolderPath] = useState('C:/Users/you/Downloads');
   const [suggestions, setSuggestions] = useState<FileSuggestion[]>([]);
   const [activeFilter, setActiveFilter] = useState<FileCategory | 'All'>('All');
+  const [searchQuery, setSearchQuery] = useState('');
   const [lastBatch, setLastBatch] = useState<OperationBatch | null>(null);
   const [pendingApplyItems, setPendingApplyItems] = useState<FileSuggestion[] | null>(null);
   const [status, setStatus] = useState('No files moved yet. The butler is standing by with both hands visible.');
@@ -31,9 +32,16 @@ export default function App() {
 
   const report = useMemo(() => buildButlerReport(suggestions), [suggestions]);
   const selectedSuggestions = suggestions.filter((suggestion) => suggestion.selected);
-  const visibleSuggestions = suggestions.filter((suggestion) =>
-    activeFilter === 'All' ? true : suggestion.category === activeFilter,
-  );
+  const normalizedSearch = searchQuery.trim().toLowerCase();
+  const visibleSuggestions = suggestions.filter((suggestion) => {
+    const matchesCategory = activeFilter === 'All' ? true : suggestion.category === activeFilter;
+    const matchesSearch =
+      normalizedSearch.length === 0 ||
+      suggestion.name.toLowerCase().includes(normalizedSearch) ||
+      suggestion.suggestedRelativePath.toLowerCase().includes(normalizedSearch);
+
+    return matchesCategory && matchesSearch;
+  });
   const isBrowserPreview = getRuntimeMode() === 'browser';
 
   async function handleChooseFolder() {
@@ -48,6 +56,7 @@ export default function App() {
       const scanned = await scanFolder(folderPath);
       setSuggestions(scanned);
       setActiveFilter('All');
+      setSearchQuery('');
       setLastBatch(null);
       setStatus(`Found ${scanned.length} files worth a polite suggestion.`);
     } catch (error) {
@@ -63,6 +72,17 @@ export default function App() {
         suggestion.id === id ? { ...suggestion, selected: !suggestion.selected } : suggestion,
       ),
     );
+  }
+
+  function selectVisibleSuggestions() {
+    const visibleIds = new Set(visibleSuggestions.map((suggestion) => suggestion.id));
+    setSuggestions((current) =>
+      current.map((suggestion) => ({ ...suggestion, selected: visibleIds.has(suggestion.id) })),
+    );
+  }
+
+  function clearSelection() {
+    setSuggestions((current) => current.map((suggestion) => ({ ...suggestion, selected: false })));
   }
 
   function requestApply(items: FileSuggestion[]) {
@@ -185,9 +205,17 @@ export default function App() {
             <div className="flex flex-col gap-3 border-b border-[#d8ded4] p-4 md:flex-row md:items-center md:justify-between">
               <div>
                 <h2 className="text-lg font-semibold">Move suggestions</h2>
-                <p className="text-sm text-[#667464]">{selectedSuggestions.length} selected for approval.</p>
+                <p className="text-sm text-[#667464]">
+                  {selectedSuggestions.length} selected for approval. {visibleSuggestions.length} visible.
+                </p>
               </div>
               <div className="flex flex-wrap gap-2">
+                <button className="btn-secondary" type="button" onClick={selectVisibleSuggestions}>
+                  Select Visible
+                </button>
+                <button className="btn-secondary" type="button" onClick={clearSelection}>
+                  Clear Selection
+                </button>
                 <button className="btn-secondary" type="button" onClick={() => requestApply(selectedSuggestions)}>
                   Apply Selected
                 </button>
@@ -203,6 +231,23 @@ export default function App() {
                 </button>
               </div>
             </div>
+
+            {suggestions.length > 0 ? (
+              <div className="border-b border-[#d8ded4] p-4">
+                <label className="block text-xs font-semibold uppercase tracking-[0.14em] text-[#667464]" htmlFor="suggestion-search">
+                  Search suggestions
+                </label>
+                <input
+                  aria-label="Search suggestions"
+                  className="mt-2 w-full rounded-md border border-[#c8d1c5] bg-white px-3 py-2 text-sm text-[#17201b] outline-none transition focus:border-[#2f6f4e] focus:ring-2 focus:ring-[#2f6f4e]/20"
+                  id="suggestion-search"
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  placeholder="Search by file name or destination"
+                  type="search"
+                  value={searchQuery}
+                />
+              </div>
+            ) : null}
 
             {suggestions.length === 0 ? (
               <div className="grid flex-1 place-items-center p-8 text-center">
