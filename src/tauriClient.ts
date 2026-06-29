@@ -1,22 +1,25 @@
 import {
-  attachDuplicateGroups,
-  makeSuggestion,
+  buildScanResult,
+  type ApplyItem,
   type FileSuggestion,
+  type OperationBatch,
+  type ScanResult,
   type ScannedFile,
+  type UndoResult,
 } from './core/downloadsButler';
 
-export type AppliedOperation = {
-  id: string;
-  beforePath: string;
-  afterPath: string;
-  fileName: string;
-};
+export type { ApplyItem, OperationBatch, UndoResult };
 
-export type OperationBatch = {
-  id: string;
-  timestamp: string;
-  operations: AppliedOperation[];
-};
+export async function getDefaultDownloadsFolder(): Promise<string> {
+  if (!isTauriRuntime()) return 'C:/Users/you/Downloads';
+
+  try {
+    const { downloadDir } = await import('@tauri-apps/api/path');
+    return await downloadDir();
+  } catch {
+    return 'Choose a Downloads folder';
+  }
+}
 
 export async function chooseFolder(): Promise<string | null> {
   if (!isTauriRuntime()) return 'C:/Users/you/Downloads';
@@ -25,37 +28,47 @@ export async function chooseFolder(): Promise<string | null> {
   return typeof selected === 'string' ? selected : null;
 }
 
-export async function scanFolder(folderPath: string): Promise<FileSuggestion[]> {
+export async function scanFolder(folderPath: string): Promise<ScanResult> {
   if (!isTauriRuntime()) {
-    return attachDuplicateGroups(sampleFiles(folderPath).map(makeSuggestion));
+    return buildScanResult(sampleFiles(folderPath), ['Subfolders are skipped in browser preview.']);
   }
 
   const { invoke } = await import('@tauri-apps/api/core');
-  return invoke<FileSuggestion[]>('scan_folder', { folderPath });
+  return invoke<ScanResult>('scan_folder', { folderPath });
 }
 
-export async function applySuggestions(suggestions: FileSuggestion[]): Promise<OperationBatch> {
+export async function applySuggestions(items: ApplyItem[]): Promise<OperationBatch> {
   if (!isTauriRuntime()) {
     return {
       id: `batch-${Date.now()}`,
       timestamp: new Date().toISOString(),
-      operations: suggestions.map((suggestion) => ({
-        id: `op-${suggestion.id}`,
-        beforePath: suggestion.path,
-        afterPath: `${dirname(suggestion.path)}/${suggestion.suggestedRelativePath}`,
-        fileName: suggestion.name,
+      status: 'applied',
+      succeeded: items.length,
+      failed: 0,
+      operations: items.map((item) => ({
+        id: `op-${item.id}`,
+        beforePath: item.path,
+        afterPath: `${dirname(item.path)}/${item.suggestedRelativePath}`,
+        fileName: basename(item.path),
+        status: 'applied',
       })),
     };
   }
 
   const { invoke } = await import('@tauri-apps/api/core');
-  return invoke<OperationBatch>('apply_operations', { items: suggestions });
+  return invoke<OperationBatch>('apply_operations', { items });
 }
 
-export async function undoLastOperation(): Promise<{ restored: number }> {
-  if (!isTauriRuntime()) return { restored: 0 };
+export async function getOperationHistory(): Promise<OperationBatch[]> {
+  if (!isTauriRuntime()) return [];
   const { invoke } = await import('@tauri-apps/api/core');
-  return invoke<{ restored: number }>('undo_last_operation');
+  return invoke<OperationBatch[]>('get_operation_history');
+}
+
+export async function undoLastOperation(): Promise<UndoResult> {
+  if (!isTauriRuntime()) return { restored: 0, failed: [] };
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke<UndoResult>('undo_last_operation');
 }
 
 export function getRuntimeMode(): 'tauri' | 'browser' {
@@ -107,4 +120,10 @@ function dirname(path: string): string {
   const normalized = path.replaceAll('\\', '/');
   const index = normalized.lastIndexOf('/');
   return index >= 0 ? normalized.slice(0, index) : normalized;
+}
+
+function basename(path: string): string {
+  const normalized = path.replaceAll('\\', '/');
+  const index = normalized.lastIndexOf('/');
+  return index >= 0 ? normalized.slice(index + 1) : normalized;
 }

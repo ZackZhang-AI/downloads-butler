@@ -2,7 +2,7 @@
 
 ## Product Positioning
 
-Downloads Butler is a local desktop file organizer for messy download folders. It scans a user-selected folder, proposes safe move and rename actions, waits for explicit confirmation, logs every operation, and supports undoing the last applied batch.
+Downloads Butler is a local desktop file organizer for messy download folders. It scans a user-selected folder, proposes safe move and rename actions, waits for explicit confirmation, logs every operation, and supports undoing the latest applied batch.
 
 The product should feel like a lightweight file butler: cautious, useful, and mildly humorous. It must never delete files in the MVP.
 
@@ -10,13 +10,13 @@ The product should feel like a lightweight file butler: cautious, useful, and mi
 
 1. Let the user select a folder, defaulting to the system Downloads folder when available.
 2. Scan first-level files in the selected folder. Do not recursively scan subfolders in v1.
-3. Classify files using extension, filename keywords, and timestamps.
+3. Classify files using shared extension and filename keyword rules.
 4. Supported categories: `Invoices`, `Screenshots`, `PDFs`, `Images`, `Installers`, `Archives`, `Documents`, `Unknown`.
 5. Detect duplicate files using `size + sha256 hash`.
 6. Generate suggested move and rename paths, but do not move anything automatically.
 7. Let the user select files and apply only those selected operations.
-8. Record operation history for every applied batch.
-9. Support `Undo Last Operation` for the latest applied batch.
+8. Record operation history for every applied batch, including success and failure details.
+9. Support `Undo Last Operation` for the latest applied batch, with partial failure reporting.
 10. Show a compact organizing report with a little butler personality.
 
 ## Explicit Non-Goals For MVP
@@ -29,6 +29,8 @@ The product should feel like a lightweight file butler: cautious, useful, and mi
 - No cloud sync or account system.
 
 ## Classification Rules
+
+Rules live in `src/shared/classificationRules.json` and are consumed by both the TypeScript preview logic and the Rust Tauri backend.
 
 Priority:
 
@@ -51,8 +53,8 @@ Keywords:
 
 Confidence defaults:
 
-- `high`: clear keyword or extension match.
-- `medium`: generic category by extension.
+- `high`: clear keyword or installer/archive extension match.
+- `medium`: generic PDF, image, or document extension match.
 - `low`: Unknown or ambiguous.
 
 ## Suggested Naming Behavior
@@ -63,21 +65,26 @@ Suggested paths should be deterministic and safe:
 - `Screenshot 2026-06-23 at 10.41.22.png` -> `Screenshots/screenshot-2026-06-23-104122.png`
 - `微信图片_20260623102039.jpg` -> `Screenshots/wechat-image-2026-06-23-102039.jpg`
 
-If the target path exists, append `-1`, `-2`, etc.
+If the target path exists or a selected batch has duplicate target paths, append `-1`, `-2`, etc.
+
+## Current Command Contract
+
+- `scan_folder(folderPath: string) -> ScanResult`
+- `apply_operations(items: ApplyItem[]) -> OperationBatch`
+- `undo_last_operation() -> UndoResult`
+- `get_operation_history() -> OperationBatch[]`
+
+Core types:
+
+- `ScanResult`: `{ suggestions, duplicateGroups, report, warnings }`
+- `ApplyItem`: `{ id, path, suggestedRelativePath, expectedHash?, expectedSize? }`
+- `OperationBatch`: `{ id, timestamp, status, operations, succeeded, failed }`
+- `AppliedOperation`: `{ id, beforePath, afterPath, fileName, status, error? }`
+- `UndoResult`: `{ restored, failed }`
 
 ## Data Model
 
-Recommended SQLite tables:
-
-- `files`
-  - `id`
-  - `original_path`
-  - `suggested_path`
-  - `file_hash`
-  - `size`
-  - `category`
-  - `confidence`
-  - `status`
+SQLite tables:
 
 - `operation_batches`
   - `id`
@@ -90,85 +97,56 @@ Recommended SQLite tables:
   - `action_type`
   - `before_path`
   - `after_path`
+  - `file_name`
   - `reversible`
   - `status`
   - `error`
 
-## Technical Stack
-
-- Tauri for the local desktop shell and filesystem operations.
-- React + TypeScript for the UI.
-- Tailwind CSS for styling.
-- SQLite for operation history.
-- Vitest for frontend/core logic tests.
-
-## Tauri Command Contract
-
-- `select_folder() -> FolderSelection`
-- `scan_folder(path: string) -> ScanResult`
-- `apply_operations(items: ApplyItem[]) -> OperationBatch`
-- `undo_last_operation() -> UndoResult`
-- `get_operation_history() -> OperationBatch[]`
+Existing local databases are migrated by adding `operations.file_name` when missing.
 
 ## UI Requirements
 
-The first screen should be the actual tool, not a marketing page.
+The first screen is the actual tool, not a marketing page.
 
 Primary areas:
 
 - Top bar: app name, selected folder, choose folder button, scan button.
 - Summary strip: category counts, duplicate count, unknown count.
 - Main list: checkbox, original file, suggested destination, category, confidence, duplicate marker.
-- Action bar: `Apply Selected`, `Apply High Confidence`, `Undo Last Operation`.
+- Duplicate filter: shows duplicate groups and lets the user stage duplicate suspects into `Duplicates/` without deleting anything.
+- Action bar: `Select Visible`, `Clear Selection`, `Apply Selected`, `Apply High Confidence`, `Undo Last Operation`.
+- Confirmation dialog: shows final absolute target paths and reiterates that nothing is deleted.
+- History panel: shows recent batches, success/failure counts, operations, and errors.
 - Butler report: concise summary plus a cautious, lightly humorous line.
 
-Tone:
+## Implementation Status
 
-- Calm, local, and safety-first.
-- Never pressure users into deleting.
-- Humor should stay short and optional-feeling.
+Status as of 2026-06-29:
 
-## Implementation Milestones
+- Shared classification rules are stored in `src/shared/classificationRules.json`.
+- Mojibake Chinese keywords were replaced with real Chinese keywords in docs, TypeScript tests, TypeScript logic, and Rust logic.
+- `scanFolder()` now returns `ScanResult` in TypeScript, and the Tauri `scan_folder` command mirrors that structure.
+- Frontend scan state now stores suggestions, duplicate groups, report, and warnings.
+- The UI includes a `Duplicates` filter, duplicate group summary, and `Move duplicate suspects to Duplicates` staging action.
+- Apply now sends narrow `ApplyItem` payloads with expected size/hash metadata.
+- Apply confirmation shows final absolute target paths and resolves same-batch target conflicts with numeric suffixes.
+- `getOperationHistory()` is wired into a Recent operations panel.
+- Undo reports partial failures in the UI.
+- Rust backend records `file_name`, operation status, and error details for history reconstruction.
+- Rust backend performs safety checks before moves: source exists, expected size matches, expected hash matches, and target directory creation succeeds.
 
-1. Project scaffold: Tauri + React + TypeScript + Tailwind + Vitest.
-2. Core rules: classification, confidence, suggested path, duplicate grouping.
-3. UI: folder selection state, scan result display, selection, filters, report.
-4. Tauri backend: scan files, hash files, apply moves, undo latest batch.
-5. Persistence: operation logs in SQLite.
-6. Verification: unit tests for rules and integration-style tests for temporary file operations where tooling allows.
+## Verification Status
 
-## Acceptance Criteria
+Verified on 2026-06-29:
 
-- App can scan a sample folder and show categorized suggestions.
-- No file moves before explicit user action.
-- User can select files and apply suggested moves.
-- Undo restores the latest applied batch where source and destination paths still allow it.
-- Duplicate files are grouped by same size and hash.
-- Unknown files are not included in high-confidence auto-selection.
-- Core rules have automated tests.
+- `npm.cmd test` passes: 2 test files, 20 tests.
+- `npm.cmd run build` passes.
 
-## Current Implementation Notes
+Blocked:
 
-When resuming work, read this file first, then inspect `package.json`, `src/`, and `src-tauri/`.
+- Native Rust/Tauri verification is still blocked in this environment because `cargo`/Rust is not installed or not on `PATH`.
+- Rust unit tests were added for shared-rule Chinese classification and duplicate grouping, but they still need to be run once Rust is available.
 
-Status as of 2026-06-24:
+## Git Notes
 
-- React preview, Tailwind UI, core rules, sample scan flow, apply flow, and frontend tests are implemented.
-- `Undo Last Operation` is now wired through `undoLastOperation()` in `src/tauriClient.ts`; browser preview falls back to a harmless mock result.
-- Browser preview shows `Scan sample folder`; Tauri runtime shows `Scan Folder`.
-- Chinese keyword tests cover `发票` and `微信图片`.
-- Native Tauri verification is still blocked in this environment because `cargo`/Rust is not installed or not on `PATH`.
-
-Additional status as of 2026-06-24:
-
-- Category filter controls are implemented in the sidebar, including `All` and every MVP category.
-- Apply actions now open a confirmation preview dialog before any move operation is invoked.
-- The confirmation dialog lists selected files and suggested destinations, and reiterates that nothing is deleted.
-- Frontend tests cover category filtering and the confirmation-before-apply flow.
-
-Status as of 2026-06-25:
-
-- The suggestions list supports search by original file name or suggested destination.
-- `Select Visible` now selects only the currently visible filtered/searched rows, replacing the previous selection.
-- `Clear Selection` resets all suggestion checkboxes.
-- Frontend tests cover search and visible-row bulk selection behavior.
+The current branch is `codex/improve-safe-apply-flow`. Previous GitHub sync used the GitHub API because ordinary `git push` could not connect to GitHub over port 443 from this machine, so local `origin/*` tracking may appear stale until network access is restored.

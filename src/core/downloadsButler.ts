@@ -1,3 +1,5 @@
+import classificationRules from '../shared/classificationRules.json';
+
 export type FileCategory =
   | 'Invoices'
   | 'Screenshots'
@@ -42,6 +44,7 @@ export type DuplicateGroup = {
   size: number;
   hash: string;
   files: Array<ScannedFile & { id: string }>;
+  recommendedKeepId?: string;
 };
 
 export type ButlerReport = {
@@ -53,30 +56,68 @@ export type ButlerReport = {
   message: string;
 };
 
-const invoiceKeywords = ['invoice', 'receipt', 'bill', 'order', 'payment', '发票', '收据', '账单'];
-const screenshotKeywords = ['screenshot', 'screen shot', '截屏', '屏幕截图', 'wx', 'wechat image', '微信图片'];
-const installerExtensions = ['.dmg', '.exe', '.pkg', '.msi', '.deb'];
-const archiveExtensions = ['.zip', '.rar', '.7z', '.tar.gz'];
-const imageExtensions = ['.png', '.jpg', '.jpeg', '.webp', '.heic'];
-const documentExtensions = ['.docx', '.xlsx', '.pptx', '.txt', '.md'];
+export type ScanResult = {
+  suggestions: FileSuggestion[];
+  duplicateGroups: DuplicateGroup[];
+  report: ButlerReport;
+  warnings: string[];
+};
+
+export type ApplyItem = {
+  id: string;
+  path: string;
+  suggestedRelativePath: string;
+  expectedHash?: string;
+  expectedSize?: number;
+};
+
+export type OperationStatus = 'applied' | 'failed' | 'undone';
+
+export type AppliedOperation = {
+  id: string;
+  beforePath: string;
+  afterPath: string;
+  fileName: string;
+  status: OperationStatus;
+  error?: string;
+};
+
+export type OperationBatch = {
+  id: string;
+  timestamp: string;
+  status: OperationStatus;
+  operations: AppliedOperation[];
+  succeeded: number;
+  failed: number;
+};
+
+export type UndoFailure = {
+  fileName: string;
+  reason: string;
+};
+
+export type UndoResult = {
+  restored: number;
+  failed: UndoFailure[];
+};
 
 export function classifyFile(file: { name: string; [key: string]: unknown }): Classification {
   const normalizedName = file.name.toLowerCase();
   const extension = getExtension(normalizedName);
 
-  if (invoiceKeywords.some((keyword) => normalizedName.includes(keyword))) {
+  if (classificationRules.invoiceKeywords.some((keyword) => normalizedName.includes(keyword.toLowerCase()))) {
     return { category: 'Invoices', confidence: 'high', reason: 'Matched invoice or billing keyword' };
   }
 
-  if (screenshotKeywords.some((keyword) => normalizedName.includes(keyword))) {
+  if (classificationRules.screenshotKeywords.some((keyword) => normalizedName.includes(keyword.toLowerCase()))) {
     return { category: 'Screenshots', confidence: 'high', reason: 'Matched screenshot keyword' };
   }
 
-  if (installerExtensions.includes(extension)) {
+  if (classificationRules.installerExtensions.includes(extension)) {
     return { category: 'Installers', confidence: 'high', reason: 'Matched installer extension' };
   }
 
-  if (archiveExtensions.includes(extension)) {
+  if (classificationRules.archiveExtensions.includes(extension)) {
     return { category: 'Archives', confidence: 'high', reason: 'Matched archive extension' };
   }
 
@@ -84,11 +125,11 @@ export function classifyFile(file: { name: string; [key: string]: unknown }): Cl
     return { category: 'PDFs', confidence: 'medium', reason: 'Matched PDF extension' };
   }
 
-  if (imageExtensions.includes(extension)) {
+  if (classificationRules.imageExtensions.includes(extension)) {
     return { category: 'Images', confidence: 'medium', reason: 'Matched image extension' };
   }
 
-  if (documentExtensions.includes(extension)) {
+  if (classificationRules.documentExtensions.includes(extension)) {
     return { category: 'Documents', confidence: 'medium', reason: 'Matched document extension' };
   }
 
@@ -133,6 +174,7 @@ export function detectDuplicateGroups(files: ScannedFile[]): DuplicateGroup[] {
         size: Number(size),
         hash,
         files: filesInBucket,
+        recommendedKeepId: filesInBucket[0]?.id,
       };
     });
 }
@@ -153,6 +195,16 @@ export function attachDuplicateGroups(suggestions: FileSuggestion[]): FileSugges
   }));
 }
 
+export function buildScanResult(files: ScannedFile[], warnings: string[] = []): ScanResult {
+  const suggestions = resolveSuggestionConflicts(attachDuplicateGroups(files.map(makeSuggestion)));
+  return {
+    suggestions,
+    duplicateGroups: detectDuplicateGroups(suggestions),
+    report: buildButlerReport(suggestions),
+    warnings,
+  };
+}
+
 export function buildButlerReport(suggestions: FileSuggestion[]): ButlerReport {
   const categoryCounts = emptyCategoryCounts();
   let highConfidence = 0;
@@ -167,7 +219,7 @@ export function buildButlerReport(suggestions: FileSuggestion[]): ButlerReport {
   const unknown = categoryCounts.Unknown;
   const message =
     duplicateFiles > 0
-      ? `I found ${duplicateFiles} duplicate suspects and still refuse to delete anything without your say-so.`
+      ? `I found ${duplicateFiles} duplicate suspects. I can organize them, but deletion remains off the menu.`
       : `I can tidy ${highConfidence} high-confidence files and refuse to delete anything. Caution is my best feature.`;
 
   return {
@@ -177,6 +229,28 @@ export function buildButlerReport(suggestions: FileSuggestion[]): ButlerReport {
     unknown,
     categoryCounts,
     message,
+  };
+}
+
+export function toApplyItems(suggestions: FileSuggestion[]): ApplyItem[] {
+  return suggestions.map((suggestion) => ({
+    id: suggestion.id,
+    path: suggestion.path,
+    suggestedRelativePath: suggestion.suggestedRelativePath,
+    expectedHash: suggestion.hash,
+    expectedSize: suggestion.size,
+  }));
+}
+
+export function buildAbsoluteTargetPath(item: Pick<ApplyItem, 'path' | 'suggestedRelativePath'>): string {
+  return `${dirname(item.path)}/${item.suggestedRelativePath}`.replaceAll('\\', '/');
+}
+
+export function moveDuplicateToDuplicates(suggestion: FileSuggestion): FileSuggestion {
+  return {
+    ...suggestion,
+    selected: true,
+    suggestedRelativePath: `Duplicates/${suggestion.suggestedName}`,
   };
 }
 
@@ -198,6 +272,19 @@ export function resolvePathConflict(relativePath: string, existingPaths: Set<str
   }
 
   return candidate;
+}
+
+function resolveSuggestionConflicts(suggestions: FileSuggestion[]): FileSuggestion[] {
+  const existingPaths = new Set<string>();
+  return suggestions.map((suggestion) => {
+    const suggestedRelativePath = resolvePathConflict(suggestion.suggestedRelativePath, existingPaths);
+    existingPaths.add(suggestedRelativePath);
+    return {
+      ...suggestion,
+      suggestedRelativePath,
+      suggestedName: suggestedRelativePath.slice(suggestedRelativePath.lastIndexOf('/') + 1),
+    };
+  });
 }
 
 function buildSuggestedName(file: ScannedFile, category: FileCategory): string {
@@ -292,4 +379,10 @@ function stableId(value: string): string {
     hash |= 0;
   }
   return `file-${Math.abs(hash)}`;
+}
+
+function dirname(path: string): string {
+  const normalized = path.replaceAll('\\', '/');
+  const index = normalized.lastIndexOf('/');
+  return index >= 0 ? normalized.slice(0, index) : normalized;
 }

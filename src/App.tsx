@@ -1,12 +1,24 @@
-import { useMemo, useState } from 'react';
-import { buildButlerReport, type FileCategory, type FileSuggestion } from './core/downloadsButler';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  buildAbsoluteTargetPath,
+  buildScanResult,
+  moveDuplicateToDuplicates,
+  resolvePathConflict,
+  toApplyItems,
+  type ApplyItem,
+  type FileCategory,
+  type FileSuggestion,
+  type OperationBatch,
+  type ScanResult,
+} from './core/downloadsButler';
 import {
   applySuggestions,
   chooseFolder,
+  getDefaultDownloadsFolder,
+  getOperationHistory,
   getRuntimeMode,
   scanFolder,
   undoLastOperation,
-  type OperationBatch,
 } from './tauriClient';
 
 const categoryOrder: FileCategory[] = [
@@ -20,21 +32,36 @@ const categoryOrder: FileCategory[] = [
   'Unknown',
 ];
 
+type ActiveFilter = FileCategory | 'All' | 'Duplicates';
+
+type PendingApplyItem = {
+  suggestion: FileSuggestion;
+  applyItem: ApplyItem;
+  targetPath: string;
+};
+
 export default function App() {
-  const [folderPath, setFolderPath] = useState('C:/Users/you/Downloads');
-  const [suggestions, setSuggestions] = useState<FileSuggestion[]>([]);
-  const [activeFilter, setActiveFilter] = useState<FileCategory | 'All'>('All');
+  const [folderPath, setFolderPath] = useState('Loading Downloads folder...');
+  const [scanResult, setScanResult] = useState<ScanResult>(() => buildScanResult([]));
+  const [activeFilter, setActiveFilter] = useState<ActiveFilter>('All');
   const [searchQuery, setSearchQuery] = useState('');
+  const [history, setHistory] = useState<OperationBatch[]>([]);
   const [lastBatch, setLastBatch] = useState<OperationBatch | null>(null);
-  const [pendingApplyItems, setPendingApplyItems] = useState<FileSuggestion[] | null>(null);
+  const [pendingApplyItems, setPendingApplyItems] = useState<PendingApplyItem[] | null>(null);
   const [status, setStatus] = useState('No files moved yet. The butler is standing by with both hands visible.');
   const [isBusy, setIsBusy] = useState(false);
 
-  const report = useMemo(() => buildButlerReport(suggestions), [suggestions]);
+  const suggestions = scanResult.suggestions;
+  const report = scanResult.report;
   const selectedSuggestions = suggestions.filter((suggestion) => suggestion.selected);
   const normalizedSearch = searchQuery.trim().toLowerCase();
   const visibleSuggestions = suggestions.filter((suggestion) => {
-    const matchesCategory = activeFilter === 'All' ? true : suggestion.category === activeFilter;
+    const matchesCategory =
+      activeFilter === 'All'
+        ? true
+        : activeFilter === 'Duplicates'
+          ? Boolean(suggestion.duplicateGroupId)
+          : suggestion.category === activeFilter;
     const matchesSearch =
       normalizedSearch.length === 0 ||
       suggestion.name.toLowerCase().includes(normalizedSearch) ||
@@ -42,7 +69,21 @@ export default function App() {
 
     return matchesCategory && matchesSearch;
   });
+  const duplicateSuggestions = suggestions.filter((suggestion) => suggestion.duplicateGroupId);
   const isBrowserPreview = getRuntimeMode() === 'browser';
+
+  useEffect(() => {
+    getDefaultDownloadsFolder().then(setFolderPath).catch(() => setFolderPath('Choose a Downloads folder'));
+    refreshHistory();
+  }, []);
+
+  async function refreshHistory() {
+    try {
+      setHistory(await getOperationHistory());
+    } catch {
+      setHistory([]);
+    }
+  }
 
   async function handleChooseFolder() {
     const selected = await chooseFolder();
@@ -53,12 +94,12 @@ export default function App() {
     setIsBusy(true);
     setStatus('Scanning without touching anything.');
     try {
-      const scanned = await scanFolder(folderPath);
-      setSuggestions(scanned);
+      const result = await scanFolder(folderPath);
+      setScanResult(result);
       setActiveFilter('All');
       setSearchQuery('');
       setLastBatch(null);
-      setStatus(`Found ${scanned.length} files worth a polite suggestion.`);
+      setStatus(`Found ${result.suggestions.length} files worth a polite suggestion.`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Scan failed.');
     } finally {
@@ -67,22 +108,38 @@ export default function App() {
   }
 
   function toggleSuggestion(id: string) {
-    setSuggestions((current) =>
-      current.map((suggestion) =>
+    setScanResult((current) => ({
+      ...current,
+      suggestions: current.suggestions.map((suggestion) =>
         suggestion.id === id ? { ...suggestion, selected: !suggestion.selected } : suggestion,
       ),
-    );
+    }));
   }
 
   function selectVisibleSuggestions() {
     const visibleIds = new Set(visibleSuggestions.map((suggestion) => suggestion.id));
-    setSuggestions((current) =>
-      current.map((suggestion) => ({ ...suggestion, selected: visibleIds.has(suggestion.id) })),
-    );
+    setScanResult((current) => ({
+      ...current,
+      suggestions: current.suggestions.map((suggestion) => ({ ...suggestion, selected: visibleIds.has(suggestion.id) })),
+    }));
   }
 
   function clearSelection() {
-    setSuggestions((current) => current.map((suggestion) => ({ ...suggestion, selected: false })));
+    setScanResult((current) => ({
+      ...current,
+      suggestions: current.suggestions.map((suggestion) => ({ ...suggestion, selected: false })),
+    }));
+  }
+
+  function stageDuplicateSuggestions() {
+    const duplicateIds = new Set(duplicateSuggestions.map((suggestion) => suggestion.id));
+    setActiveFilter('Duplicates');
+    setScanResult((current) => ({
+      ...current,
+      suggestions: current.suggestions.map((suggestion) =>
+        duplicateIds.has(suggestion.id) ? moveDuplicateToDuplicates(suggestion) : { ...suggestion, selected: false },
+      ),
+    }));
   }
 
   function requestApply(items: FileSuggestion[]) {
@@ -90,22 +147,37 @@ export default function App() {
       setStatus('Nothing selected. I admire the restraint.');
       return;
     }
-    setPendingApplyItems(items);
+
+    const seenTargets = new Set<string>();
+    const applyItems = toApplyItems(items).map((item) => {
+      const suggestedRelativePath = resolvePathConflict(item.suggestedRelativePath, seenTargets);
+      seenTargets.add(suggestedRelativePath);
+      return { ...item, suggestedRelativePath };
+    });
+    setPendingApplyItems(
+      items.map((suggestion, index) => ({
+        suggestion,
+        applyItem: applyItems[index],
+        targetPath: buildAbsoluteTargetPath(applyItems[index]),
+      })),
+    );
   }
 
-  async function handleApply(items: FileSuggestion[]) {
+  async function handleApply(items: PendingApplyItem[]) {
     setIsBusy(true);
     try {
-      const batch = await applySuggestions(items);
+      const batch = await applySuggestions(items.map((item) => item.applyItem));
       setLastBatch(batch);
       setPendingApplyItems(null);
-      setStatus(`Applied ${batch.operations.length} careful moves. No deletions, as promised.`);
-      const movedIds = new Set(items.map((item) => item.id));
-      setSuggestions((current) =>
-        current.map((suggestion) =>
+      setStatus(`Applied ${batch.succeeded} careful moves. ${batch.failed} failed. No deletions, as promised.`);
+      const movedIds = new Set(items.map((item) => item.suggestion.id));
+      setScanResult((current) => ({
+        ...current,
+        suggestions: current.suggestions.map((suggestion) =>
           movedIds.has(suggestion.id) ? { ...suggestion, selected: false } : suggestion,
         ),
-      );
+      }));
+      await refreshHistory();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Apply failed.');
     } finally {
@@ -114,16 +186,17 @@ export default function App() {
   }
 
   async function handleUndo() {
-    if (!lastBatch) {
-      setStatus('No previous operation to undo.');
-      return;
-    }
     setIsBusy(true);
     try {
       const result = await undoLastOperation();
-      const restored = result.restored || lastBatch.operations.length;
-      setStatus(`Undo restored ${restored} files from the last operation.`);
+      const failures = result.failed.map((failure) => `${failure.fileName}: ${failure.reason}`).join(' ');
+      setStatus(
+        failures
+          ? `Undo restored ${result.restored} files. ${result.failed.length} could not be restored. ${failures}`
+          : `Undo restored ${result.restored} files from the last operation.`,
+      );
       setLastBatch(null);
+      await refreshHistory();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Undo failed.');
     } finally {
@@ -131,15 +204,15 @@ export default function App() {
     }
   }
 
+  const visibleTitle = activeFilter === 'Duplicates' ? 'Duplicate groups' : 'Move suggestions';
+
   return (
     <main className="min-h-[100dvh] bg-[#f6f7f4] text-[#17201b]">
       <section className="mx-auto flex min-h-[100dvh] w-full max-w-7xl flex-col gap-6 px-4 py-5 sm:px-6 lg:px-8">
         <header className="flex flex-col gap-4 border-b border-[#d8ded4] pb-5 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#667464]">Local file butler</p>
-            <h1 className="mt-2 text-4xl font-semibold tracking-[-0.03em] text-[#17201b] md:text-5xl">
-              Downloads Butler
-            </h1>
+            <h1 className="mt-2 text-4xl font-semibold text-[#17201b] md:text-5xl">Downloads Butler</h1>
             <p className="mt-3 max-w-2xl text-base leading-7 text-[#596359]">
               Scan first, suggest second, move only after you approve. A tiny desktop steward for the folder where
               everything somehow lands.
@@ -168,30 +241,33 @@ export default function App() {
           <Metric label="Unknown" value={report.unknown} />
         </section>
 
+        {scanResult.warnings.length > 0 ? (
+          <section className="rounded-lg border border-[#dfc8aa] bg-[#fff8ed] px-4 py-3 text-sm text-[#755018]">
+            {scanResult.warnings.map((warning) => (
+              <p key={warning}>{warning}</p>
+            ))}
+          </section>
+        ) : null}
+
         <section className="grid flex-1 gap-5 lg:grid-cols-[260px_1fr]">
           <aside className="rounded-lg border border-[#d8ded4] bg-white p-4">
             <h2 className="text-sm font-semibold text-[#17201b]">Categories</h2>
             <div className="mt-4 space-y-2">
-              <button
-                aria-label="All"
-                className={`category-button ${activeFilter === 'All' ? 'category-button-active' : ''}`}
-                type="button"
-                onClick={() => setActiveFilter('All')}
-              >
-                <span>All</span>
-                <span className="font-semibold">{suggestions.length}</span>
-              </button>
+              <FilterButton active={activeFilter === 'All'} count={suggestions.length} label="All" onClick={() => setActiveFilter('All')} />
+              <FilterButton
+                active={activeFilter === 'Duplicates'}
+                count={duplicateSuggestions.length}
+                label="Duplicates"
+                onClick={() => setActiveFilter('Duplicates')}
+              />
               {categoryOrder.map((category) => (
-                <button
-                  aria-label={category}
+                <FilterButton
+                  active={activeFilter === category}
+                  count={report.categoryCounts[category]}
                   key={category}
-                  className={`category-button ${activeFilter === category ? 'category-button-active' : ''}`}
-                  type="button"
+                  label={category}
                   onClick={() => setActiveFilter(category)}
-                >
-                  <span>{category}</span>
-                  <span className="font-semibold">{report.categoryCounts[category]}</span>
-                </button>
+                />
               ))}
             </div>
 
@@ -204,7 +280,7 @@ export default function App() {
           <section className="flex min-h-[420px] flex-col rounded-lg border border-[#d8ded4] bg-white">
             <div className="flex flex-col gap-3 border-b border-[#d8ded4] p-4 md:flex-row md:items-center md:justify-between">
               <div>
-                <h2 className="text-lg font-semibold">Move suggestions</h2>
+                <h2 className="text-lg font-semibold">{visibleTitle}</h2>
                 <p className="text-sm text-[#667464]">
                   {selectedSuggestions.length} selected for approval. {visibleSuggestions.length} visible.
                 </p>
@@ -215,6 +291,9 @@ export default function App() {
                 </button>
                 <button className="btn-secondary" type="button" onClick={clearSelection}>
                   Clear Selection
+                </button>
+                <button className="btn-secondary" type="button" onClick={stageDuplicateSuggestions}>
+                  Move duplicate suspects to Duplicates
                 </button>
                 <button className="btn-secondary" type="button" onClick={() => requestApply(selectedSuggestions)}>
                   Apply Selected
@@ -246,6 +325,17 @@ export default function App() {
                   type="search"
                   value={searchQuery}
                 />
+              </div>
+            ) : null}
+
+            {activeFilter === 'Duplicates' && scanResult.duplicateGroups.length > 0 ? (
+              <div className="border-b border-[#d8ded4] bg-[#f9faf7] p-4 text-sm text-[#435044]">
+                {scanResult.duplicateGroups.map((group) => (
+                  <p key={group.id}>
+                    {group.id}: {group.files.length} files, {formatBytes(group.size)} each. Suggested keep:{' '}
+                    {group.recommendedKeepId ?? 'first file'}.
+                  </p>
+                ))}
               </div>
             ) : null}
 
@@ -305,11 +395,16 @@ export default function App() {
           {lastBatch ? (
             <div className="mt-2 space-y-1">
               {lastBatch.operations.map((operation) => (
-                <p key={operation.id}>{operation.fileName} moved</p>
+                <p key={operation.id}>
+                  {operation.fileName} {operation.status}
+                  {operation.error ? `: ${operation.error}` : ''}
+                </p>
               ))}
             </div>
           ) : null}
         </section>
+
+        <HistoryPanel batches={history} />
 
         {pendingApplyItems ? (
           <div className="fixed inset-0 z-50 grid place-items-center bg-[#17201b]/35 px-4">
@@ -325,7 +420,7 @@ export default function App() {
                     Confirm careful moves
                   </h2>
                   <p className="mt-2 text-sm text-[#667464]">
-                    {pendingApplyItems.length} files selected. Nothing will be deleted.
+                    Preflight checks complete. {pendingApplyItems.length} files selected. Nothing will be deleted.
                   </p>
                 </div>
                 <button className="btn-secondary" type="button" onClick={() => setPendingApplyItems(null)}>
@@ -335,9 +430,9 @@ export default function App() {
 
               <div className="mt-4 max-h-72 space-y-3 overflow-auto">
                 {pendingApplyItems.map((item) => (
-                  <div key={item.id} className="rounded-md bg-[#f6f7f4] p-3">
-                    <p className="text-sm font-semibold text-[#17201b]">{item.name}</p>
-                    <p className="mt-1 break-all font-mono text-xs text-[#596359]">{item.suggestedRelativePath}</p>
+                  <div key={item.suggestion.id} className="rounded-md bg-[#f6f7f4] p-3">
+                    <p className="text-sm font-semibold text-[#17201b]">{item.suggestion.name}</p>
+                    <p className="mt-1 break-all font-mono text-xs text-[#596359]">{item.targetPath}</p>
                   </div>
                 ))}
               </div>
@@ -358,11 +453,54 @@ export default function App() {
   );
 }
 
+function FilterButton({ active, count, label, onClick }: { active: boolean; count: number; label: string; onClick: () => void }) {
+  return (
+    <button aria-label={label} className={`category-button ${active ? 'category-button-active' : ''}`} type="button" onClick={onClick}>
+      <span>{label}</span>
+      <span className="font-semibold">{count}</span>
+    </button>
+  );
+}
+
+function HistoryPanel({ batches }: { batches: OperationBatch[] }) {
+  const recentBatches = useMemo(() => batches.slice(0, 20), [batches]);
+
+  return (
+    <section className="rounded-lg border border-[#d8ded4] bg-white p-4">
+      <h2 className="text-lg font-semibold text-[#17201b]">Recent operations</h2>
+      {recentBatches.length === 0 ? (
+        <p className="mt-2 text-sm text-[#667464]">No recorded moves yet.</p>
+      ) : (
+        <div className="mt-3 space-y-3">
+          {recentBatches.map((batch) => (
+            <article key={batch.id} className="rounded-md bg-[#f6f7f4] p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="font-mono text-xs font-semibold text-[#263128]">{batch.id}</p>
+                <p className="text-xs text-[#667464]">
+                  {batch.succeeded} succeeded, {batch.failed} failed
+                </p>
+              </div>
+              <div className="mt-2 space-y-1 text-xs text-[#435044]">
+                {batch.operations.map((operation) => (
+                  <p key={operation.id}>
+                    {operation.fileName}: {operation.status}
+                    {operation.error ? ` - ${operation.error}` : ''}
+                  </p>
+                ))}
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Metric({ label, value }: { label: string; value: number }) {
   return (
     <div className="rounded-lg border border-[#d8ded4] bg-white p-4">
       <p className="text-sm text-[#667464]">{label}</p>
-      <p className="mt-2 text-3xl font-semibold tracking-[-0.03em]">{value}</p>
+      <p className="mt-2 text-3xl font-semibold">{value}</p>
     </div>
   );
 }

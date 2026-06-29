@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildButlerReport,
+  buildScanResult,
   classifyFile,
   detectDuplicateGroups,
   makeSuggestion,
+  resolvePathConflict,
 } from './downloadsButler';
 
 describe('Downloads Butler rules', () => {
@@ -28,6 +30,15 @@ describe('Downloads Butler rules', () => {
       category: 'Screenshots',
       confidence: 'high',
     });
+  });
+
+  it('classifies the MVP extension set', () => {
+    expect(classifyFile({ name: 'bundle.tar.gz' })).toMatchObject({ category: 'Archives', confidence: 'high' });
+    expect(classifyFile({ name: 'setup.msi' })).toMatchObject({ category: 'Installers', confidence: 'high' });
+    expect(classifyFile({ name: 'notes.md' })).toMatchObject({ category: 'Documents', confidence: 'medium' });
+    expect(classifyFile({ name: 'photo.heic' })).toMatchObject({ category: 'Images', confidence: 'medium' });
+    expect(classifyFile({ name: 'plain.pdf' })).toMatchObject({ category: 'PDFs', confidence: 'medium' });
+    expect(classifyFile({ name: 'mystery.bin' })).toMatchObject({ category: 'Unknown', confidence: 'low' });
   });
 
   it('generates deterministic suggested paths', () => {
@@ -61,6 +72,43 @@ describe('Downloads Butler rules', () => {
 
     expect(groups).toHaveLength(1);
     expect(groups[0].files.map((file) => file.id)).toEqual(['1', '2']);
+  });
+
+  it('builds a scan result with suggestions, duplicate groups, report, and warnings', () => {
+    const result = buildScanResult(
+      [
+        {
+          id: '1',
+          name: 'invoice.pdf',
+          path: 'C:/Users/me/Downloads/invoice.pdf',
+          size: 10,
+          hash: 'same',
+          modifiedAt: '2026-06-23T00:00:00.000Z',
+        },
+        {
+          id: '2',
+          name: 'invoice copy.pdf',
+          path: 'C:/Users/me/Downloads/invoice copy.pdf',
+          size: 10,
+          hash: 'same',
+          modifiedAt: '2026-06-23T00:00:00.000Z',
+        },
+      ],
+      ['Skipped subfolders.'],
+    );
+
+    expect(result.suggestions).toHaveLength(2);
+    expect(result.duplicateGroups).toHaveLength(1);
+    expect(result.report.duplicates).toBe(2);
+    expect(result.warnings).toEqual(['Skipped subfolders.']);
+  });
+
+  it('resolves target path conflicts with numeric suffixes', () => {
+    const existingPaths = new Set(['Invoices/invoice-unknown-2026-06-23.pdf', 'Invoices/invoice-unknown-2026-06-23-1.pdf']);
+
+    expect(resolvePathConflict('Invoices/invoice-unknown-2026-06-23.pdf', existingPaths)).toBe(
+      'Invoices/invoice-unknown-2026-06-23-2.pdf',
+    );
   });
 
   it('builds a cautious butler report', () => {
