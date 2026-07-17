@@ -1,14 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildButlerReport,
+  buildScanResult,
   classifyFile,
   detectDuplicateGroups,
   makeSuggestion,
+  resolvePathConflict,
 } from './downloadsButler';
 
 describe('Downloads Butler rules', () => {
   it('classifies invoice keywords before generic PDFs', () => {
-    expect(classifyFile({ name: 'invoice-final-final.pdf', size: 120, modifiedAt: '2026-06-23T10:20:00.000Z' })).toMatchObject({
+    expect(
+      classifyFile({ name: 'invoice-final-final.pdf', size: 120, modifiedAt: '2026-06-23T10:20:00.000Z' }),
+    ).toMatchObject({
+      category: 'Invoices',
+      confidence: 'high',
+    });
+  });
+
+  it('classifies Chinese invoice keywords before generic PDFs', () => {
+    expect(classifyFile({ name: '发票_20260623.pdf', size: 120, modifiedAt: '2026-06-23T10:20:00.000Z' })).toMatchObject({
       category: 'Invoices',
       confidence: 'high',
     });
@@ -19,6 +30,15 @@ describe('Downloads Butler rules', () => {
       category: 'Screenshots',
       confidence: 'high',
     });
+  });
+
+  it('classifies the MVP extension set', () => {
+    expect(classifyFile({ name: 'bundle.tar.gz' })).toMatchObject({ category: 'Archives', confidence: 'high' });
+    expect(classifyFile({ name: 'setup.msi' })).toMatchObject({ category: 'Installers', confidence: 'high' });
+    expect(classifyFile({ name: 'notes.md' })).toMatchObject({ category: 'Documents', confidence: 'medium' });
+    expect(classifyFile({ name: 'photo.heic' })).toMatchObject({ category: 'Images', confidence: 'medium' });
+    expect(classifyFile({ name: 'plain.pdf' })).toMatchObject({ category: 'PDFs', confidence: 'medium' });
+    expect(classifyFile({ name: 'mystery.bin' })).toMatchObject({ category: 'Unknown', confidence: 'low' });
   });
 
   it('generates deterministic suggested paths', () => {
@@ -32,6 +52,17 @@ describe('Downloads Butler rules', () => {
     expect(suggestion.suggestedRelativePath).toBe('Screenshots/screenshot-2026-06-23-104122.png');
   });
 
+  it('normalizes WeChat image names with parsed timestamps', () => {
+    const suggestion = makeSuggestion({
+      name: '微信图片_20260623102039.jpg',
+      path: 'C:/Users/me/Downloads/微信图片_20260623102039.jpg',
+      size: 100,
+      modifiedAt: '2026-06-23T10:20:00.000Z',
+    });
+
+    expect(suggestion.suggestedRelativePath).toBe('Screenshots/wechat-image-2026-06-23-102039.jpg');
+  });
+
   it('groups duplicates only when both size and hash match', () => {
     const groups = detectDuplicateGroups([
       { id: '1', name: 'a.pdf', path: '/a.pdf', size: 10, hash: 'same', modifiedAt: '2026-06-23T00:00:00.000Z' },
@@ -41,6 +72,43 @@ describe('Downloads Butler rules', () => {
 
     expect(groups).toHaveLength(1);
     expect(groups[0].files.map((file) => file.id)).toEqual(['1', '2']);
+  });
+
+  it('builds a scan result with suggestions, duplicate groups, report, and warnings', () => {
+    const result = buildScanResult(
+      [
+        {
+          id: '1',
+          name: 'invoice.pdf',
+          path: 'C:/Users/me/Downloads/invoice.pdf',
+          size: 10,
+          hash: 'same',
+          modifiedAt: '2026-06-23T00:00:00.000Z',
+        },
+        {
+          id: '2',
+          name: 'invoice copy.pdf',
+          path: 'C:/Users/me/Downloads/invoice copy.pdf',
+          size: 10,
+          hash: 'same',
+          modifiedAt: '2026-06-23T00:00:00.000Z',
+        },
+      ],
+      ['Skipped subfolders.'],
+    );
+
+    expect(result.suggestions).toHaveLength(2);
+    expect(result.duplicateGroups).toHaveLength(1);
+    expect(result.report.duplicates).toBe(2);
+    expect(result.warnings).toEqual(['Skipped subfolders.']);
+  });
+
+  it('resolves target path conflicts with numeric suffixes', () => {
+    const existingPaths = new Set(['Invoices/invoice-unknown-2026-06-23.pdf', 'Invoices/invoice-unknown-2026-06-23-1.pdf']);
+
+    expect(resolvePathConflict('Invoices/invoice-unknown-2026-06-23.pdf', existingPaths)).toBe(
+      'Invoices/invoice-unknown-2026-06-23-2.pdf',
+    );
   });
 
   it('builds a cautious butler report', () => {
