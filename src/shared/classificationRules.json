@@ -1,0 +1,8 @@
+{
+  "invoiceKeywords": ["invoice", "receipt", "bill", "order", "payment", "发票", "收据", "账单"],
+  "screenshotKeywords": ["screenshot", "screen shot", "截屏", "屏幕截图", "wx", "wechat image", "微信图片"],
+  "installerExtensions": [".dmg", ".exe", ".pkg", ".msi", ".deb"],
+  "archiveExtensions": [".zip", ".rar", ".7z", ".tar.gz"],
+  "imageExtensions": [".png", ".jpg", ".jpeg", ".webp", ".heic"],
+  "documentExtensions": [".docx", ".xlsx", ".pptx", ".txt", ".md"]
+}
